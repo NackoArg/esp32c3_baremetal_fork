@@ -216,7 +216,7 @@ int main(void) {
         }
 
         uint32_t lo   = TIMG_T0LO_REG;   /* 32 bits bajos del contador latcheado */
-        uint32_t bit4 = lo & (1U << 8);  /* extraer bit4. Si lo cambio conmuta mas lento. Cuenta hasta 16, o sea que debe ser menor o igual a 16 */
+        uint32_t bit4 = lo & (1U << 11);  /* extraer bit4. Si lo cambio conmuta mas lento. Cuenta hasta 16, o sea que debe ser menor o igual a 16 */
 
         if (bit4 != prev_bit4) {         /* detecta flanco en bit4 */
             prev_bit4 = bit4;
