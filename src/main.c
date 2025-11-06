@@ -1,58 +1,73 @@
 /*
- * Baremetal LED toggle en ESP32-C3 usando TIMG0 y GPIO3.
- * Autor: Nacko (correcciones integradas)
+ * main.c — PIR (HC-SR501) -> Servo a 0 deg / 90 deg con PWM por software a 50 Hz
+ * Plataforma: ESP32-C3 (bare-metal)
+ *
+ * Idea:
+ *  - PIR en GPIO4 (entrada digital). 1 = movimiento, 0 = sin movimiento.
+ *  - SERVO en GPIO2 (salida). Generamos pulsos de 1.0 ms (aprox 0 deg) o 1.5 ms (aprox 90 deg)
+ *    cada 20 ms (50 Hz). La senal del servo es de 3.3 V. Alimentar el servo con 5 V y GND comun.
  */
 
 #include <stdint.h>
 
 /* ==========================================================
- * BASES DE PERIFÉRICOS
+ * BASES DE PERIFERICOS (direcciones base de bloques)
  * ========================================================== */
-#define GPIO_BASE            0x60004000UL
-#define TIMG0_BASE           0x6001F000UL
-#define TIMG1_BASE           0x60020000UL
-#define SYSTEM_BASE          0x600C0000UL
-#define RTC_CNTL_BASE        0x60008000UL
+#define GPIO_BASE        0x60004000UL
+#define IO_MUX_BASE      0x60009000UL
+#define TIMG0_BASE       0x6001F000UL
+#define TIMG1_BASE       0x60020000UL
+#define SYSTEM_BASE      0x600C0000UL
+#define RTC_CNTL_BASE    0x60008000UL
 
 /* ==========================================================
  * REGISTROS GPIO (offsets desde GPIO_BASE)
  * ========================================================== */
-#define GPIO_OUT_REG         (*(volatile uint32_t*)(GPIO_BASE + 0x0004))
-#define GPIO_OUT_W1TS_REG    (*(volatile uint32_t*)(GPIO_BASE + 0x0008))
-#define GPIO_OUT_W1TC_REG    (*(volatile uint32_t*)(GPIO_BASE + 0x000C))
-#define GPIO_ENABLE_REG      (*(volatile uint32_t*)(GPIO_BASE + 0x0020))
-#define GPIO_ENABLE_W1TS_REG (*(volatile uint32_t*)(GPIO_BASE + 0x0024))
-#define GPIO_ENABLE_W1TC_REG (*(volatile uint32_t*)(GPIO_BASE + 0x0028))
-
-/* Pin del LED y su máscara */
-#define LED_GPIO 3
-#define LED_MASK (1U << LED_GPIO)
-
-/* Mantiene un segmento .rodata pequeño para el enlace en DROM. */
-static const char app_banner[] __attribute__((used)) = "ESP32-C3 baremetal demo";
+#define GPIO_OUT_REG          (*(volatile uint32_t*)(GPIO_BASE + 0x0004))
+#define GPIO_OUT_W1TS_REG     (*(volatile uint32_t*)(GPIO_BASE + 0x0008))
+#define GPIO_OUT_W1TC_REG     (*(volatile uint32_t*)(GPIO_BASE + 0x000C))
+#define GPIO_ENABLE_REG       (*(volatile uint32_t*)(GPIO_BASE + 0x0020))
+#define GPIO_ENABLE_W1TS_REG  (*(volatile uint32_t*)(GPIO_BASE + 0x0024))
+#define GPIO_ENABLE_W1TC_REG  (*(volatile uint32_t*)(GPIO_BASE + 0x0028))
+#define GPIO_IN_REG           (*(volatile uint32_t*)(GPIO_BASE + 0x003C))  /* lectura de nivel GPIO */
 
 /* ==========================================================
- * TIMG0: REGISTROS TIMER0 (offsets desde TIMG0_BASE)
+ * REGISTROS IO_MUX usados (offsets desde IO_MUX_BASE)
+ *  GPIO2 -> offset 0x000C
+ *  GPIO4 -> offset 0x0014
  * ========================================================== */
-#define TIMG_T0CONFIG_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x0000))
-#define TIMG_T0LO_REG        (*(volatile uint32_t*)(TIMG0_BASE + 0x0004))
-#define TIMG_T0HI_REG        (*(volatile uint32_t*)(TIMG0_BASE + 0x0008))
-#define TIMG_T0UPDATE_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x000C))
-#define TIMG_T0ALARMLO_REG   (*(volatile uint32_t*)(TIMG0_BASE + 0x0010))
-#define TIMG_T0ALARMHI_REG   (*(volatile uint32_t*)(TIMG0_BASE + 0x0014))
-#define TIMG_T0LOADLO_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x0018))
-#define TIMG_T0LOADHI_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x001C))
-#define TIMG_T0LOAD_REG      (*(volatile uint32_t*)(TIMG0_BASE + 0x0020))
-#define TIMG_REGCLK_REG      (*(volatile uint32_t*)(TIMG0_BASE + 0x00FC))
+#define IO_MUX_GPIO2_REG      (*(volatile uint32_t*)(IO_MUX_BASE + 0x000C))
+#define IO_MUX_GPIO4_REG      (*(volatile uint32_t*)(IO_MUX_BASE + 0x0014))
+
+/* Bits IO_MUX (familia ESP32; usar TRM para confirmar) */
+#define IO_MUX_FUN_WPD_BIT    7    /* pull-down enable */
+#define IO_MUX_FUN_WPU_BIT    8    /* pull-up enable */
+#define IO_MUX_FUN_IE_BIT     9    /* input enable */
+#define IO_MUX_MCU_SEL_MASK   0xF  /* bits [3:0] seleccion de funcion */
+#define IO_MUX_MCU_SEL_GPIO   1    /* 1 = funcion GPIO */
 
 /* ==========================================================
- * CLOCK GATING a nivel de sistema
+ * TIMER GROUP 0 — TIMER0 (T0)
+ * ========================================================== */
+#define TIMG_T0CONFIG_REG     (*(volatile uint32_t*)(TIMG0_BASE + 0x0000))
+#define TIMG_T0LO_REG         (*(volatile uint32_t*)(TIMG0_BASE + 0x0004))
+#define TIMG_T0HI_REG         (*(volatile uint32_t*)(TIMG0_BASE + 0x0008))
+#define TIMG_T0UPDATE_REG     (*(volatile uint32_t*)(TIMG0_BASE + 0x000C))
+#define TIMG_T0ALARMLO_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x0010))
+#define TIMG_T0ALARMHI_REG    (*(volatile uint32_t*)(TIMG0_BASE + 0x0014))
+#define TIMG_T0LOADLO_REG     (*(volatile uint32_t*)(TIMG0_BASE + 0x0018))
+#define TIMG_T0LOADHI_REG     (*(volatile uint32_t*)(TIMG0_BASE + 0x001C))
+#define TIMG_T0LOAD_REG       (*(volatile uint32_t*)(TIMG0_BASE + 0x0020))
+#define TIMG_REGCLK_REG       (*(volatile uint32_t*)(TIMG0_BASE + 0x00FC))
+
+/* ==========================================================
+ * CLOCK GATING (puede variar segun revision)
  * ========================================================== */
 #define SYSTEM_PERIP_CLK_EN0_REG      (*(volatile uint32_t*)(SYSTEM_BASE + 0x0000))
-#define SYSTEM_TIMERGROUP_CLK_EN_MASK (1U << 13)  /* habilita APB clk a TIMG0 */
+#define SYSTEM_TIMERGROUP_CLK_EN_MASK (1U << 13)
 
 /* ==========================================================
- * WATCHDOGS (TIMGx MWDT y RTC WDT/SWD)
+ * WATCHDOGS (macros resumidas)
  * ========================================================== */
 #define TIMG_WDTCONFIG0_OFFSET 0x0048
 #define TIMG_WDTCONFIG1_OFFSET 0x004C
@@ -63,10 +78,6 @@ static const char app_banner[] __attribute__((used)) = "ESP32-C3 baremetal demo"
 #define TIMG_WDTFEED_OFFSET    0x0060
 #define TIMG_WDTWPROTECT_OFFSET 0x0064
 #define TIMG_WDT_UNLOCK_KEY    0x50D83AA1U
-#define TIMG_WDT_STAGE0_MASK   (0x3U << 29)
-#define TIMG_WDT_STAGE1_MASK   (0x3U << 27)
-#define TIMG_WDT_STAGE2_MASK   (0x3U << 25)
-#define TIMG_WDT_STAGE3_MASK   (0x3U << 23)
 
 #define RTC_CNTL_WDTCONFIG0_OFFSET    0x0090
 #define RTC_CNTL_WDTCONFIG1_OFFSET    0x0094
@@ -80,6 +91,18 @@ static const char app_banner[] __attribute__((used)) = "ESP32-C3 baremetal demo"
 #define RTC_CNTL_WDT_UNLOCK_KEY       0x50D83AA1U
 #define RTC_CNTL_SWD_UNLOCK_KEY       0x8F1D312AU
 
+/* ==========================================================
+ * GPIO usados (PIR y SERVO)
+ * ========================================================== */
+#define PIR_GPIO   4
+#define PIR_MASK   (1U << PIR_GPIO)
+
+#define SERVO_GPIO 2
+#define SERVO_MASK (1U << SERVO_GPIO)
+
+/* ==========================================================
+ * Helpers: deshabilitar WDTs (TIMG0/1 y RTC)
+ * ========================================================== */
 static void disable_timg_wdt(uint32_t timer_base) {
     volatile uint32_t *wdt_protect = (volatile uint32_t *)(timer_base + TIMG_WDTWPROTECT_OFFSET);
     volatile uint32_t *wdt_config0 = (volatile uint32_t *)(timer_base + TIMG_WDTCONFIG0_OFFSET);
@@ -99,15 +122,11 @@ static void disable_timg_wdt(uint32_t timer_base) {
     *wdt_config5 = 0;
 
     uint32_t reg = *wdt_config0;
-    reg &= ~(1U << 31); /* TIMG_WDT_EN */
-    reg &= ~(1U << 14); /* TIMG_WDT_FLASHBOOT_MOD_EN */
-    reg &= ~(1U << 13); /* TIMG_WDT_PROCPU_RESET_EN */
-    reg &= ~(1U << 12); /* TIMG_WDT_APPCPU_RESET_EN (compat) */
-    reg &= ~TIMG_WDT_STAGE0_MASK;
-    reg &= ~TIMG_WDT_STAGE1_MASK;
-    reg &= ~TIMG_WDT_STAGE2_MASK;
-    reg &= ~TIMG_WDT_STAGE3_MASK;
-    reg |= (1U << 22);  /* TIMG_WDT_CONF_UPDATE_EN */
+    reg &= ~(1U << 31); /* EN = 0 */
+    reg &= ~(1U << 14); /* FLASHBOOT_MOD_EN = 0 */
+    reg &= ~(1U << 13); /* PROCPU_RESET_EN = 0 */
+    reg &= ~(1U << 12); /* APPCPU_RESET_EN = 0 (compat) */
+    reg |= (1U << 22);  /* CONF_UPDATE_EN = 1 */
     *wdt_config0 = reg;
 
     *wdt_protect = 0;
@@ -125,109 +144,140 @@ static void disable_rtc_wdts(void) {
     volatile uint32_t *swd_conf    = (volatile uint32_t *)(RTC_CNTL_BASE + RTC_CNTL_SWD_CONF_OFFSET);
 
     *wdt_protect = RTC_CNTL_WDT_UNLOCK_KEY;
-    *wdt_feed = (1U << 31);
+    *wdt_feed    = (1U << 31);
     *wdt_config1 = 0;
     *wdt_config2 = 0;
     *wdt_config3 = 0;
     *wdt_config4 = 0;
 
     uint32_t reg = *wdt_config0;
-    reg &= ~(1U << 31); /* RTC_CNTL_WDT_EN */
-    reg &= ~(1U << 12); /* RTC_CNTL_WDT_FLASHBOOT_MOD_EN */
-    reg &= ~(1U << 11); /* RTC_CNTL_WDT_PROCPU_RESET_EN */
-    reg &= ~(1U << 10); /* RTC_CNTL_WDT_APPCPU_RESET_EN */
-    reg &= ~(7U << 28);
-    reg &= ~(7U << 25);
-    reg &= ~(7U << 22);
-    reg &= ~(7U << 19);
+    reg &= ~(1U << 31);
+    reg &= ~(1U << 12);
+    reg &= ~(1U << 11);
+    reg &= ~(1U << 10);
     *wdt_config0 = reg;
     *wdt_protect = 0;
 
     *swd_protect = RTC_CNTL_SWD_UNLOCK_KEY;
-    *swd_conf |= (1U << 30);  /* Deshabilitar super WDT */
+    *swd_conf   |= (1U << 30);
     *swd_protect = 0;
 }
 
 /* ==========================================================
- * GPIO: salida en LED_GPIO
+ * GPIO init: SERVO como salida; PIR como entrada (IO_MUX IE)
  * ========================================================== */
-static void gpio_init(void) {
-    GPIO_ENABLE_W1TS_REG = LED_MASK;  /* habilita GPIO como salida */
-    GPIO_OUT_W1TC_REG    = LED_MASK;  /* lo deja apagado (nivel bajo) */
+static void gpio_init(void)
+{
+    /* SERVO (GPIO2) salida en bajo inicial */
+    GPIO_ENABLE_W1TS_REG = SERVO_MASK;  /* habilita salida en GPIO2 */
+    GPIO_OUT_W1TC_REG    = SERVO_MASK;  /* pone nivel bajo */
+
+    /* IO_MUX GPIO2: funcion GPIO, sin pulls, IE habilitado (no afecta salida) */
+    uint32_t m2 = IO_MUX_GPIO2_REG;
+    m2 &= ~((1U << IO_MUX_FUN_WPD_BIT) | (1U << IO_MUX_FUN_WPU_BIT));
+    m2 |=  (1U << IO_MUX_FUN_IE_BIT);
+    m2 = (m2 & ~IO_MUX_MCU_SEL_MASK) | IO_MUX_MCU_SEL_GPIO;
+    IO_MUX_GPIO2_REG = m2;
+
+    /* PIR (GPIO4) entrada: deshabilitar salida y habilitar IE en IO_MUX */
+    GPIO_ENABLE_W1TC_REG = PIR_MASK;    /* asegura que GPIO4 no sea salida */
+    uint32_t m4 = IO_MUX_GPIO4_REG;
+    m4 &= ~((1U << IO_MUX_FUN_WPD_BIT) | (1U << IO_MUX_FUN_WPU_BIT));
+    m4 |=  (1U << IO_MUX_FUN_IE_BIT);   /* input enable */
+    m4 = (m4 & ~IO_MUX_MCU_SEL_MASK) | IO_MUX_MCU_SEL_GPIO;
+    IO_MUX_GPIO4_REG = m4;
 }
 
 /* ==========================================================
- * TIMG0:T0 - Configuración
- *  - Fuente: APB_CLK (T0_USE_XTAL = 0)
- *  - Conteo ascendente (T0_INCREASE = 1)
- *  - Prescaler: 0 => divisor 65536 (máximo)
- *  - Carga inicial: 0 (LOAD y luego LOAD_REG)
- *  - Habilitar reloj de periférico y del timer
+ * TIMG0 init: T0 con 1 tick = 1 us (APB_CLK ~ 80 MHz -> divisor 80)
  * ========================================================== */
-static void timer0_init(void) {
-    /* 1) Habilitar clock gating del sistema al Timer Group0 (APB -> TIMG0) */
-    SYSTEM_PERIP_CLK_EN0_REG |= SYSTEM_TIMERGROUP_CLK_EN_MASK;
+static void timg0_init_1us_ticks(void)
+{
+    SYSTEM_PERIP_CLK_EN0_REG |= SYSTEM_TIMERGROUP_CLK_EN_MASK; /* gating TG0 */
+    TIMG_REGCLK_REG |= (1U << 30);                             /* is active */
 
-    /* 2) Asegurar clock interno del timer activo (bit de TIMER_CLK_IS_ACTIVE).
-          En muchas revisiones es el bit 30; si ya está en 1, no pasa nada. */
-    TIMG_REGCLK_REG |= (1U << 30);
+    TIMG_T0CONFIG_REG &= ~(1U << 31);  /* T0_EN = 0 */
+    TIMG_T0CONFIG_REG &= ~(1U << 9);   /* T0_USE_XTAL = 0 -> usa APB_CLK */
+    TIMG_T0CONFIG_REG |=  (1U << 30);  /* T0_INCREASE = 1 */
 
-    /* 3) Detener Timer0 antes de configurar */
-    TIMG_T0CONFIG_REG &= ~(1U << 31); /* T0_EN = 0 */
+    TIMG_T0CONFIG_REG &= ~(0xFFFFU << 13); /* limpia divisor */
+    TIMG_T0CONFIG_REG |=  (80U << 13);     /* divisor = 80 -> 1 us por tick si APB=80 MHz */
+    TIMG_T0CONFIG_REG |=  (1U << 12);      /* T0_DIVIDER_RST latch */
 
-    /* 4) Seleccionar APB (deshabilitar XTAL explícitamente) */
-    TIMG_T0CONFIG_REG &= ~(1U << 9);  /* T0_USE_XTAL = 0 => APB_CLK */
-
-    /* 5) Conteo ascendente */
-    TIMG_T0CONFIG_REG |= (1U << 30);  /* T0_INCREASE = 1 */
-
-    /* 6) Prescaler: poner 0 en el campo [28:13] => divisor 65536 (muy lento) */
-    TIMG_T0CONFIG_REG &= ~(0xFFFFU << 13);  /* limpiar campo divisor */
-    TIMG_T0CONFIG_REG |=  (1U << 12);       /* T0_DIVIDER_RST = 1 (aplica nuevo divisor) */
-
-    /* 7) Cargar valor inicial 0 y aplicar carga inmediata */
     TIMG_T0LOADLO_REG = 0;
     TIMG_T0LOADHI_REG = 0;
-    TIMG_T0LOAD_REG   = 1;   /* trigger de recarga */
+    TIMG_T0LOAD_REG   = 1;
 
-    /* 8) Habilitar Timer0: comienza a contar */
-    TIMG_T0CONFIG_REG |= (1U << 31);  /* T0_EN = 1 */
+    TIMG_T0CONFIG_REG |=  (1U << 31);  /* T0_EN = 1 */
+}
+
+/* Lectura de tiempo actual en microsegundos del T0 (64 bits) */
+static uint64_t t0_now_us(void)
+{
+    TIMG_T0UPDATE_REG = (1U << 31);
+    while (TIMG_T0UPDATE_REG & (1U << 31)) { }
+    uint32_t lo = TIMG_T0LO_REG;
+    uint32_t hi = TIMG_T0HI_REG;
+    return (((uint64_t)hi) << 32) | lo;
+}
+
+/* Delay activo en microsegundos usando T0 */
+static void delay_us(uint32_t us)
+{
+    uint64_t start = t0_now_us();
+    while ((t0_now_us() - start) < (uint64_t)us) { }
 }
 
 /* ==========================================================
- * MAIN: Polling del bit 4 del contador (latch con T0UPDATE)
+ * PWM del SERVO por software:
+ *  - width_us: tipico 1000 us (0 deg), 1500 us (90 deg), 2000 us (180 deg)
+ *  - Periodo fijo: 20 ms (50 Hz)
  * ========================================================== */
-int main(void) {
-    /* Deshabilitar watchdogs (evita resets inesperados en baremetal) */
+#define SERVO_PERIOD_US   20000U
+
+static void servo_pulse_us(uint32_t width_us)
+{
+    if (width_us < 500U)  width_us = 500U;   /* limites de seguridad */
+    if (width_us > 2500U) width_us = 2500U;
+
+    GPIO_OUT_W1TS_REG = SERVO_MASK;   /* pulso en alto */
+    delay_us(width_us);               /* ancho de pulso */
+    GPIO_OUT_W1TC_REG = SERVO_MASK;   /* fin del pulso (nivel bajo) */
+    {
+        uint32_t rest = (SERVO_PERIOD_US > width_us) ? (SERVO_PERIOD_US - width_us) : 0U;
+        delay_us(rest);               /* completa 20 ms totales */
+    }
+}
+
+/* ==========================================================
+ * MAIN
+ * ========================================================== */
+int main(void)
+{
+    /* 1) Deshabilitar watchdogs */
     disable_timg_wdt(TIMG0_BASE);
     disable_timg_wdt(TIMG1_BASE);
     disable_rtc_wdts();
 
+    /* 2) Inicializar GPIOs */
     gpio_init();
-    timer0_init();
 
-    uint32_t prev_bit4 = 0;
+    /* 3) Inicializar TIMG0 para base de 1 us por tick */
+    timg0_init_1us_ticks();
 
-    while (1) {
-        /* Latch del contador: escribir 1<<31 y esperar a que HW lo limpie */
-        TIMG_T0UPDATE_REG = (1U << 31);
-        while (TIMG_T0UPDATE_REG & (1U << 31)) {
-            /* espera a que el latch se haga efectivo */
-        }
+    /* 4) Loop: PIR 0 -> servo 0 deg (1000 us); PIR 1 -> servo 90 deg (1500 us) */
+    for (;;)
+    {
+        uint32_t pir_state = (GPIO_IN_REG & PIR_MASK) ? 1U : 0U;
+        uint32_t width_us  = pir_state ? 1500U : 1000U;
 
-        uint32_t lo   = TIMG_T0LO_REG;   /* 32 bits bajos del contador latcheado */
-        uint32_t bit4 = lo & (1U << 11);  /* extraer bit4. Si lo cambio conmuta mas lento. Cuenta hasta 16, o sea que debe ser menor o igual a 16 */
+        /* Generar un frame de 20 ms con el ancho correspondiente */
+        servo_pulse_us(width_us);
 
-        if (bit4 != prev_bit4) {         /* detecta flanco en bit4 */
-            prev_bit4 = bit4;
-            if (bit4) {
-                GPIO_OUT_W1TS_REG = LED_MASK;  /* LED ON */
-            } else {
-                GPIO_OUT_W1TC_REG = LED_MASK;  /* LED OFF */
-            }
-        }
+        /* Si el estado cambia, en el siguiente frame se actualiza el ancho. */
     }
 
     /* no retorna */
     // return 0;
 }
+

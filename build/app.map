@@ -17,37 +17,36 @@ LOAD /home/nacko/.espressif/tools/riscv32-esp-elf/esp-15.1.0_20250607/riscv32-es
                 0x3fce4000                        PROVIDE (_stack_top = (ORIGIN (DRAM) + LENGTH (DRAM)))
                 [!provide]                        PROVIDE (__stack = _stack_top)
 
-.text           0x42000000      0x1e0
+.text           0x42000000      0x26c
                 0x42000000                        _stext = .
  *(.init)
  .init          0x42000000       0x5e build/startup.o
                 0x42000000                _start
  *(.init.*)
  *(.text.startup*)
- .text.startup  0x4200005e      0x182 build/main.o
+ .text.startup  0x4200005e      0x1b8 build/main.o
                 0x4200005e                main
  *(.text*)
- .text          0x420001e0        0x0 build/startup.o
- .text          0x420001e0        0x0 build/main.o
-                0x420001e0                        . = ALIGN (0x4)
- *fill*         0x420001e0        0x0 
-                0x420001e0                        _etext = .
+ .text          0x42000216        0x0 build/startup.o
+ .text          0x42000216       0x54 build/main.o
+                0x4200026c                        . = ALIGN (0x4)
+ *fill*         0x4200026a        0x2 
+                0x4200026c                        _etext = .
 
-.rodata         0x3c000000       0x18 load address 0x420001e0
+.rela.dyn       0x4200026c        0x0
+ .rela.init     0x4200026c        0x0 build/startup.o
+
+.rodata         0x3c000000        0x0 load address 0x4200026c
                 0x3c000000                        . = ALIGN (0x4)
                 0x3c000000                        _srodata = .
  *(.rodata)
- .rodata        0x3c000000       0x18 build/main.o
  *(.rodata.*)
  *(.srodata)
  *(.srodata.*)
-                0x3c000018                        . = ALIGN (0x4)
-                0x3c000018                        _erodata = .
+                0x3c000000                        . = ALIGN (0x4)
+                0x3c000000                        _erodata = .
 
-.rela.dyn       0x3c000018        0x0 load address 0x420001f8
- .rela.init     0x3c000018        0x0 build/startup.o
-
-.data           0x3fc80000        0x0 load address 0x420001f8
+.data           0x3fc80000        0x0 load address 0x4200026c
                 0x3fc80000                        . = ALIGN (0x4)
                 0x3fc80000                        _sdata = .
  *(.data)
@@ -60,10 +59,10 @@ LOAD /home/nacko/.espressif/tools/riscv32-esp-elf/esp-15.1.0_20250607/riscv32-es
  *(.sdata2.*)
                 0x3fc80000                        . = ALIGN (0x4)
                 0x3fc80000                        _edata = .
-                0x420001f8                        PROVIDE (_sidata = LOADADDR (.data))
+                0x4200026c                        PROVIDE (_sidata = LOADADDR (.data))
                 [!provide]                        PROVIDE (__global_pointer$ = (_sdata + 0x800))
 
-.bss            0x3fc80000        0x0 load address 0x420001f8
+.bss            0x3fc80000        0x0 load address 0x4200026c
                 0x3fc80000                        . = ALIGN (0x8)
                 0x3fc80000                        _sbss = .
  *(.bss)
